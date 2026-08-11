@@ -313,7 +313,7 @@ Goal: push → lint + test + build image; merge to main → deploy.
 3. README: architecture diagram (even a simple one), setup instructions,
    API summary (or link to `/docs`), and the normalization/denormalization
    writeup from Phase 2 — mentors like seeing the reasoning, not just the
-   code.
+   code. All the tool/librarys used and for what purpose.
 4. Double-check every response follows the "JSON + correct status code"
    rule from the spec, including error responses (a consistent
    `{"detail": "..."}` shape is fine).
