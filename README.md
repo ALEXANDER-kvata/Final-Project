@@ -35,3 +35,16 @@ deletes, and later the Lambda size recompute need to keep that counter correct.
 The real application uses SQLAlchemy models and Alembic migrations. The
 `app/db/raw/` folder contains a plain SQL schema plus asyncpg examples for the
 course requirement to show the same database work without an ORM.
+
+## Project Endpoints
+
+Phase 4 adds JWT-protected project management endpoints:
+
+- `POST /projects` creates a project and grants the creator the `owner` role.
+- `GET /projects` lists projects the current user can access, including nested
+  document metadata.
+- `GET /project/{project_id}/info` returns one accessible project.
+- `PUT /project/{project_id}/info` lets owners or participants edit name and
+  description.
+- `DELETE /project/{project_id}` is owner-only and prepares the S3 cleanup path
+  that Phase 5 will fill in with real object deletion.
