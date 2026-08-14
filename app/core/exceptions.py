@@ -20,6 +20,21 @@ class ForbiddenError(AppError):
     detail = "Forbidden"
 
 
+class BadRequestError(AppError):
+    status_code = status.HTTP_400_BAD_REQUEST
+    detail = "Invalid request"
+
+
+class PayloadTooLargeError(AppError):
+    status_code = status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
+    detail = "Payload too large"
+
+
+class StorageError(AppError):
+    status_code = status.HTTP_502_BAD_GATEWAY
+    detail = "Storage backend error"
+
+
 async def app_error_handler(_request: Request, exc: AppError) -> JSONResponse:
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 

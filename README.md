@@ -46,5 +46,37 @@ Phase 4 adds JWT-protected project management endpoints:
 - `GET /project/{project_id}/info` returns one accessible project.
 - `PUT /project/{project_id}/info` lets owners or participants edit name and
   description.
-- `DELETE /project/{project_id}` is owner-only and prepares the S3 cleanup path
-  that Phase 5 will fill in with real object deletion.
+- `DELETE /project/{project_id}` is owner-only; it removes every stored object
+  for the project before deleting the row (cascade clears the child rows).
+
+## Document Endpoints
+
+Phase 5 stores document content in S3 (LocalStack locally) and keeps only
+metadata in Postgres:
+
+- `POST /project/{project_id}/documents` uploads one or more files.
+- `GET /project/{project_id}/documents` lists the project's document metadata.
+- `GET /document/{document_id}` streams the file back with its original
+  `Content-Type` and `Content-Disposition`.
+- `PUT /document/{document_id}` replaces the stored file and its metadata.
+- `DELETE /document/{document_id}` removes the object and the row.
+
+Every document route authorizes against the document's *parent project*, so a
+user with no `project_access` row gets a 404 rather than a leak that the
+document exists.
+
+### Storage rules
+
+- Objects are keyed `projects/{project_id}/{document_id}/{filename}`, which
+  keeps everything for one project under a single prefix.
+- Uploads are validated by extension (`ALLOWED_DOCUMENT_EXTENSIONS`, default
+  `.pdf,.docx`) and rejected with 400 when the type is not allowed.
+- A single file over `MAX_DOCUMENT_SIZE_BYTES`, or an upload that would push
+  `projects.total_size_bytes` past `MAX_PROJECT_SIZE_BYTES`, is rejected with
+  413. The limit check reads the denormalized counter from Phase 2 instead of
+  summing document rows, and uploads/replacements/deletes keep that counter in
+  step. Phase 7 adds the asynchronous Lambda recompute.
+- Uploads are transactional: if S3 or the database fails part-way, the rows are
+  rolled back and any objects already written are removed.
+- The bucket is created on startup if it does not exist, so a fresh LocalStack
+  container works without manual setup.
