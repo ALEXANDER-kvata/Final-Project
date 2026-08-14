@@ -8,6 +8,7 @@ from app.api.auth import router as auth_router
 from app.api.documents import router as documents_router
 from app.api.health import router as health_router
 from app.api.projects import router as projects_router
+from app.api.sharing import router as sharing_router
 from app.core.config import settings
 from app.core.exceptions import register_exception_handlers
 from app.storage.s3_client import ensure_bucket
@@ -31,6 +32,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router)
     app.include_router(projects_router)
     app.include_router(documents_router)
+    app.include_router(sharing_router)
     return app
 
 

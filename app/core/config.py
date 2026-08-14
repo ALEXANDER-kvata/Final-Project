@@ -13,6 +13,12 @@ class Settings(BaseSettings):
     jwt_secret_key: str = Field(default="change-me-in-development", min_length=16)
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60
+    invite_token_expire_minutes: int = 24 * 60
+
+    app_base_url: str = "http://localhost:8000"
+    smtp_host: str | None = None
+    smtp_port: int = 1025
+    email_from: str = "no-reply@project-dashboard.local"
 
     s3_bucket_name: str = "project-documents"
     aws_region: str = "us-east-1"

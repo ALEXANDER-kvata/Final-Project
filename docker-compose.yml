@@ -13,6 +13,8 @@ services:
         condition: service_healthy
       localstack:
         condition: service_started
+      mailhog:
+        condition: service_started
 
   db:
     image: postgres:16-alpine
@@ -40,6 +42,12 @@ services:
       - "4566:4566"
     volumes:
       - localstack_data:/var/lib/localstack
+
+  mailhog:
+    image: mailhog/mailhog:v1.0.1
+    ports:
+      - "1025:1025"  # SMTP endpoint the API sends invites to
+      - "8025:8025"  # web UI for reading them
 
 volumes:
   postgres_data:
