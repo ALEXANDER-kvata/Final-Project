@@ -58,9 +58,7 @@ async def ensure_bucket() -> None:
 
         create_kwargs: dict[str, Any] = {"Bucket": settings.s3_bucket_name}
         if settings.aws_region != "us-east-1":
-            create_kwargs["CreateBucketConfiguration"] = {
-                "LocationConstraint": settings.aws_region
-            }
+            create_kwargs["CreateBucketConfiguration"] = {"LocationConstraint": settings.aws_region}
 
         try:
             await client.create_bucket(**create_kwargs)

@@ -258,3 +258,38 @@ you check this yourself:
   small, self-contained integration tests
   (`tests/integration/test_raw_queries.py`) using a plain `asyncpg` connection
   — it doesn't power the real API, so it isn't exercised by anything else.
+
+## CI/CD
+
+`.github/workflows/ci.yml` runs on every push and pull request:
+
+- **lint** — `ruff check .` and `ruff format --check .`.
+- **test** — `docker compose up -d --wait db localstack` (only those two; the
+  suite talks to the app in-process, not over HTTP, so `api`/`mailhog` aren't
+  needed), `alembic upgrade head` against the real dev database as a
+  standalone checkpoint, then `pytest --cov=app --cov-report=xml`. The
+  coverage XML is uploaded as a workflow artifact. Both jobs cache Poetry's
+  install directory, keyed on `poetry.lock`'s hash — meaning `poetry.lock`
+  needs to be committed (it wasn't, from Phase 1 onward; fixed as part of this
+  phase) for the cache and reproducible installs to actually work.
+- **build** — needs lint + test to pass first. Builds the Dockerfile with
+  `docker/build-push-action`, tagged with the git SHA (and `latest` on
+  `main`). Pushes to GHCR only on `push` events (not `pull_request`, since
+  forked PRs don't have registry write access and shouldn't publish images).
+  `docker/metadata-action` lowercases the image name automatically — GHCR
+  rejects uppercase, and `github.repository` preserves whatever case the
+  GitHub org/repo actually has.
+- **deploy** — gated to pushes on `main` only. No real target exists yet, so
+  this is a placeholder step that prints the pushed image reference rather
+  than pretending to deploy somewhere. Per the plan's own guidance ("don't
+  over-engineer this part unless your course specifically grades cloud
+  deployment"), wire it up to a real target (SSH + `docker compose pull && up
+  -d`, a cloud run service, etc.) if and when you have one.
+
+One gotcha the CI setup surfaced and fixed: the LocalStack Lambda init hook
+(`docker/localstack-init/ready.d/deploy_lambdas.py`) used to wait up to 30s
+for the `api` container to create the S3 bucket, then give up. CI only starts
+`db`+`localstack` (no `api`), so that wait always timed out. The hook now
+creates the bucket itself if nothing has beaten it to it — self-sufficient
+regardless of which services are running, which was true of local dev too,
+just never exercised until CI needed a `db`+`localstack`-only start.

@@ -128,7 +128,9 @@ async def test_invite_email_falls_back_to_logging_without_smtp(
 ) -> None:
     monkeypatch.setattr(settings, "smtp_host", None)
 
-    delivery = await send_invite_email("someone@example.com", "Demo", "http://localhost/join?token=x")
+    delivery = await send_invite_email(
+        "someone@example.com", "Demo", "http://localhost/join?token=x"
+    )
 
     assert delivery == "logged"
 
@@ -140,6 +142,8 @@ async def test_invite_email_reports_logged_when_smtp_is_unreachable(
     monkeypatch.setattr(settings, "smtp_host", "127.0.0.1")
     monkeypatch.setattr(settings, "smtp_port", 1)
 
-    delivery = await send_invite_email("someone@example.com", "Demo", "http://localhost/join?token=x")
+    delivery = await send_invite_email(
+        "someone@example.com", "Demo", "http://localhost/join?token=x"
+    )
 
     assert delivery == "logged"

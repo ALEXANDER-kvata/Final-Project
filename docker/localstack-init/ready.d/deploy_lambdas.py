@@ -14,10 +14,10 @@ import os
 import shutil
 import subprocess
 import sys
-import time
 import zipfile
 
 import boto3
+from botocore.exceptions import ClientError
 
 ENDPOINT_URL = "http://localhost:4566"
 REGION = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
@@ -26,7 +26,6 @@ INTERNAL_SHARED_SECRET = os.environ.get("INTERNAL_SHARED_SECRET", "")
 SOURCE_ROOT = "/etc/localstack/lambdas"
 BUILD_ROOT = "/tmp/lambda-build"
 ROLE_ARN = "arn:aws:iam::000000000000:role/lambda-role"
-BUCKET_WAIT_SECONDS = 30
 LAMBDA_PYTHON_VERSION = "3.12"  # must match the Runtime passed to create_function below
 
 
@@ -45,9 +44,7 @@ def read_requirements(path: str) -> list[str]:
         return []
     with open(path) as handle:
         return [
-            line.strip()
-            for line in handle
-            if line.strip() and not line.strip().startswith("#")
+            line.strip() for line in handle if line.strip() and not line.strip().startswith("#")
         ]
 
 
@@ -141,22 +138,31 @@ def deploy(lambda_client, name: str, environment: dict[str, str]) -> str:
     return lambda_client.get_function(FunctionName=name)["Configuration"]["FunctionArn"]
 
 
-def wait_for_bucket(s3_client) -> None:
-    """The api container also creates the bucket on startup; whichever wins, wait for it."""
-    for _ in range(BUCKET_WAIT_SECONDS):
-        try:
-            s3_client.head_bucket(Bucket=BUCKET)
-            return
-        except Exception:  # noqa: BLE001 - bucket-not-found errors vary, just retry
-            time.sleep(1)
-    raise RuntimeError(f"bucket {BUCKET} did not appear within {BUCKET_WAIT_SECONDS}s")
+def ensure_bucket(s3_client) -> None:
+    """Create the bucket if nothing has yet — this hook must not depend on the
+    api container being up (e.g. CI only starts db+localstack for testing).
+    If the api container *does* win the race and creates it first, that's
+    fine too; head_bucket succeeding is enough.
+    """
+    try:
+        s3_client.head_bucket(Bucket=BUCKET)
+        return
+    except Exception:  # noqa: BLE001 - bucket-not-found errors vary by client
+        pass
+
+    try:
+        s3_client.create_bucket(Bucket=BUCKET)
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code")
+        if code not in {"BucketAlreadyOwnedByYou", "BucketAlreadyExists"}:
+            raise
 
 
 def main() -> None:
     lambda_client = client("lambda")
     s3_client = client("s3")
 
-    wait_for_bucket(s3_client)
+    ensure_bucket(s3_client)
 
     compute_size_arn = deploy(
         lambda_client,
@@ -176,17 +182,13 @@ def main() -> None:
                     "Id": "compute-size-on-upload",
                     "LambdaFunctionArn": compute_size_arn,
                     "Events": ["s3:ObjectCreated:*"],
-                    "Filter": {
-                        "Key": {"FilterRules": [{"Name": "prefix", "Value": "projects/"}]}
-                    },
+                    "Filter": {"Key": {"FilterRules": [{"Name": "prefix", "Value": "projects/"}]}},
                 },
                 {
                     "Id": "resize-image-on-upload",
                     "LambdaFunctionArn": resize_image_arn,
                     "Events": ["s3:ObjectCreated:*"],
-                    "Filter": {
-                        "Key": {"FilterRules": [{"Name": "prefix", "Value": "projects/"}]}
-                    },
+                    "Filter": {"Key": {"FilterRules": [{"Name": "prefix", "Value": "projects/"}]}},
                 },
             ]
         },

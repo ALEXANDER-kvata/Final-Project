@@ -77,9 +77,9 @@ async def test_non_member_gets_404_on_every_route(
 
     response = await client.request(method, path, headers=headers, **kwargs)
 
-    assert response.status_code == 404, (
-        f"{method} {path} -> {response.status_code}: {response.text}"
-    )
+    assert (
+        response.status_code == 404
+    ), f"{method} {path} -> {response.status_code}: {response.text}"
 
 
 async def test_participant_cannot_delete_the_project(client: AsyncClient, scenario: dict) -> None:
