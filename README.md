@@ -187,3 +187,74 @@ at `corrupted_value + new_upload_size`, still wrong. Only the Lambda's async
 recompute, which re-derives the total from `documents.size_bytes`, lands on
 the true sum. This was run against a fresh, from-scratch `docker compose up`
 and passed.
+
+## Testing
+
+Two tiers, matching different things that break:
+
+- **`tests/*.py`** — fast, dependency-injected unit tests. Every DB/S3 call is
+  a fake or a fixture, so there's nothing to start; `poetry run pytest` runs
+  them in a couple of seconds. Good for exercising validation logic, access
+  rules, and route wiring in isolation.
+- **`tests/integration/*.py`** — the real FastAPI app driven end-to-end
+  through `httpx.AsyncClient` + `ASGITransport`, against a real Postgres
+  database and real LocalStack S3. These are what actually prove the
+  register→login→create-project→upload→download→invite flows work together,
+  not just in isolation.
+
+Run everything:
+
+```powershell
+docker compose up -d db localstack   # only these two services are needed
+poetry run pytest
+```
+
+If `db`/`localstack` aren't reachable on `localhost`, every integration test
+is **skipped**, not failed — `poetry run pytest` still passes with just the
+unit tests. This is a fixture check (`tests/integration/conftest.py`), not a
+manual step: nothing needs to be configured to get that behavior.
+
+### How the integration suite stays isolated
+
+- **Database:** a dedicated `project_dashboard_test` database (created
+  automatically if missing) gets Alembic migrations run against it once per
+  session. Each test gets its own connection wrapped in an outer transaction;
+  the app's own `session.commit()` calls become `SAVEPOINT`s nested inside it
+  (SQLAlchemy's `join_transaction_mode="create_savepoint"`), and the whole
+  thing rolls back at the end of the test. Nothing a test writes is ever
+  visible to another test or left behind in the database. The engine itself
+  is also created fresh per test rather than shared — pytest-asyncio gives
+  each test its own event loop, and asyncpg connections are bound to the loop
+  that opened them, so a shared engine would occasionally hand one test a
+  connection created (and unusable) on a previous test's already-closed loop.
+- **S3:** real calls to LocalStack, using the app's actual `aioboto3`-based
+  `app/storage/s3_client.py` — not a mock. Objects this suite writes stay in
+  the bucket (S3 has no transactions to roll back), but every test uses a
+  fresh project/document id, so nothing collides.
+- **Why LocalStack and not `moto`:** this app talks to S3 through `aioboto3`
+  (`aiobotocore`), whose HTTP calls go over `aiohttp`. `moto`'s request
+  interception patches botocore's own HTTP layer and doesn't reliably catch
+  `aiohttp`-based traffic, so it silently fails to mock `aiobotocore` calls.
+  Phase 8's own notes allow this alternative ("mock S3 with moto, or point at
+  LocalStack in CI"), and this project already has a fully verified LocalStack
+  setup from Phases 5/7 — reusing it here is more reliable than fighting that
+  incompatibility, and Phase 9's CI spins up the same service containers.
+
+### Coverage
+
+```powershell
+poetry run pytest --cov=app --cov-report=term-missing
+```
+
+Currently **89%** on `app/`, comfortably inside the 70–80% goal. Two notes if
+you check this yourself:
+
+- The coverage config sets `concurrency = ["greenlet"]`. SQLAlchemy's async
+  engine bridges to its sync core through a spawned greenlet for every
+  awaited DB call; without this setting, `coverage.py` can't see into that
+  greenlet and drastically *under*-counts every route that touches the
+  database (as low as 55% instead of 90%+ for the same code).
+- `app/db/raw/queries.py` (the Phase 2 "without ORM" deliverable) has its own
+  small, self-contained integration tests
+  (`tests/integration/test_raw_queries.py`) using a plain `asyncpg` connection
+  — it doesn't power the real API, so it isn't exercised by anything else.
