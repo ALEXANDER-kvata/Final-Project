@@ -28,11 +28,10 @@ jobs:
       - name: Install dependencies
         run: poetry install
 
+      # tox.ini defines these commands once, so CI and a local `tox -e lint`
+      # run exactly the same lint/format checks.
       - name: Lint
-        run: poetry run ruff check .
-
-      - name: Format check
-        run: poetry run ruff format --check .
+        run: poetry run tox -e lint
 
   test:
     runs-on: ubuntu-latest
@@ -64,11 +63,10 @@ jobs:
       - name: Start Postgres and LocalStack
         run: docker compose up -d --wait db localstack
 
-      - name: Run database migrations
-        run: poetry run alembic upgrade head
-
+      # tox.ini defines this command once (migrations + pytest --cov), so CI
+      # and a local `tox -e test` run exactly the same checks.
       - name: Test with coverage
-        run: poetry run pytest --cov=app --cov-report=term-missing --cov-report=xml
+        run: poetry run tox -e test
 
       - name: Upload coverage report
         if: always()

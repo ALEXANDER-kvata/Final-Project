@@ -1,9 +1,52 @@
 # Project Management Dashboard
 
-FastAPI backend for a project management dashboard with Postgres, JWT authentication,
-S3-compatible document storage, and later Lambda-based background processing.
+FastAPI backend for a project management dashboard: JWT-authenticated projects
+with owner/participant access control, S3-backed document storage, email
+invites, and async background processing via Lambda.
 
-## Phase 1
+## Tech Stack
+
+| Layer | Tool | Why |
+|---|---|---|
+| Web framework | [FastAPI](https://fastapi.tiangolo.com/) + [Uvicorn](https://www.uvicorn.org/) | async-native, generates the `/docs` OpenAPI UI for free |
+| Database / ORM | [PostgreSQL](https://www.postgresql.org/), [SQLAlchemy 2.0](https://www.sqlalchemy.org/) (async), [Alembic](https://alembic.sqlalchemy.org/) | the real data layer; `asyncpg` is the driver |
+| No-ORM deliverable | plain [`asyncpg`](https://magicstack.github.io/asyncpg/) | `app/db/raw/` — hand-written SQL, per the course's "with/without ORM" requirement |
+| Auth | [`python-jose`](https://github.com/mpdavis/python-jose) (JWT), [`passlib[bcrypt]`](https://passlib.readthedocs.io/) | token issuing/verification, password hashing |
+| Config | [`pydantic-settings`](https://docs.pydantic.dev/latest/concepts/pydantic_settings/) | typed env-var settings (`app/core/config.py`) |
+| Object storage | [`aioboto3`](https://github.com/terrycain/aioboto3) against [LocalStack](https://www.localstack.cloud/) (dev) or real S3 (prod) | async S3 client, same code path both environments |
+| Email (dev) | [MailHog](https://github.com/mailhog/MailHog) over SMTP (stdlib `smtplib`) | invite links land in a local inbox instead of needing real SMTP/SES |
+| Background compute | AWS Lambda (via LocalStack locally), [Pillow](https://pillow.readthedocs.io/) for thumbnails | async size recompute + optional image thumbnailing, triggered by S3 events |
+| Containers | Docker, Docker Compose | one command brings up the whole stack: api, db, localstack, mailhog |
+| Testing | `pytest`, `pytest-asyncio`, `pytest-cov`, `httpx` (`ASGITransport`) | unit tests (fakes) + integration tests (real Postgres/S3) — see [Testing](#testing) |
+| Lint / format | [`ruff`](https://docs.astral.sh/ruff/) | one fast tool covering flake8 + isort + a formatter |
+| Task runner | [`tox`](https://tox.wiki/) | `tox -e lint` / `tox -e test` run identically in CI and locally |
+| Dependencies | [Poetry](https://python-poetry.org/) | `pyproject.toml` + committed `poetry.lock` for reproducible installs |
+| CI/CD | GitHub Actions, GHCR | lint → test → build → (push on `main`) → deploy placeholder |
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Client(["Client / Swagger UI"]) -->|JWT Bearer| API["FastAPI app"]
+
+    API --> DB[("PostgreSQL")]
+    API --> S3[("S3 (LocalStack / AWS)")]
+    API --> Mail["MailHog (SMTP, dev)"]
+
+    S3 -->|"ObjectCreated event"| ComputeSize["compute_size Lambda"]
+    S3 -->|"ObjectCreated event"| ResizeImage["resize_image Lambda"]
+    ComputeSize -->|"X-Internal-Secret"| API
+    ResizeImage -->|"writes thumbnails/..."| S3
+```
+
+The API is the only thing clients talk to directly. Lambdas are invoked
+asynchronously by S3 itself, not by the API — `compute_size` calls back into
+a small internal endpoint (shared-secret, not JWT, since a Lambda has no
+user), and `resize_image` writes straight back to S3. See
+[Async Background Processing](#async-background-processing-lambda) for why
+that split exists.
+
+## Getting Started
 
 ```powershell
 docker compose up --build
@@ -12,9 +55,41 @@ docker compose up --build
 Then visit:
 
 - API health: http://localhost:8000/health
-- OpenAPI docs: http://localhost:8000/docs
+- OpenAPI docs: http://localhost:8000/docs — the interactive way to try every
+  endpoint below; click **Authorize** after logging in via `/login`.
+- MailHog inbox (invite emails): http://localhost:8025
 
-Local development uses Postgres and LocalStack through Docker Compose.
+Local development uses Postgres, LocalStack (S3 + Lambda), and MailHog
+through Docker Compose — see `docker-compose.yml` and `.env.example` for the
+full list of services and settings.
+
+## API Summary
+
+Every route below requires a `Bearer` JWT (`/auth`, `/login`, `/health` are
+the only exceptions) — see the per-section write-ups further down for the
+access-control rules, request/response shapes, and design reasoning behind
+each group.
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/auth` | Register |
+| POST | `/login` | Log in, get a JWT |
+| GET | `/me` | Current user |
+| POST | `/projects` | Create a project (creator becomes owner) |
+| GET | `/projects` | List accessible projects, with nested documents |
+| GET | `/project/{id}/info` | Read one project |
+| PUT | `/project/{id}/info` | Update name/description (owner or participant) |
+| DELETE | `/project/{id}` | Delete a project and its documents (owner-only) |
+| POST | `/project/{id}/documents` | Upload one or more documents |
+| GET | `/project/{id}/documents` | List a project's documents |
+| GET | `/document/{id}` | Download a document |
+| PUT | `/document/{id}` | Replace a document's content |
+| DELETE | `/document/{id}` | Delete a document |
+| POST | `/project/{id}/invite` | Grant a user access by login (owner-only) |
+| GET | `/project/{id}/share` | Email a signed, expiring join link (owner-only) |
+| GET | `/join` | Redeem a share-link token |
+| POST | `/internal/projects/{id}/recompute-size` | Lambda-only: re-derive the size counter (shared secret, not JWT) |
+| GET | `/health` | Liveness + DB connectivity check |
 
 ## Data Model
 
@@ -206,8 +281,11 @@ Run everything:
 
 ```powershell
 docker compose up -d db localstack   # only these two services are needed
-poetry run pytest
+poetry run tox -e test               # migrations checkpoint + pytest --cov
 ```
+
+(`poetry run pytest` directly also works — `tox -e test` just wraps that same
+command so CI and local dev can never drift apart; see [CI/CD](#cicd).)
 
 If `db`/`localstack` aren't reachable on `localhost`, every integration test
 is **skipped**, not failed — `poetry run pytest` still passes with just the
@@ -243,7 +321,7 @@ manual step: nothing needs to be configured to get that behavior.
 ### Coverage
 
 ```powershell
-poetry run pytest --cov=app --cov-report=term-missing
+poetry run tox -e test
 ```
 
 Currently **89%** on `app/`, comfortably inside the 70–80% goal. Two notes if
@@ -263,15 +341,23 @@ you check this yourself:
 
 `.github/workflows/ci.yml` runs on every push and pull request:
 
-- **lint** — `ruff check .` and `ruff format --check .`.
+- **lint** — `tox -e lint` (`ruff check .` + `ruff format --check .`).
 - **test** — `docker compose up -d --wait db localstack` (only those two; the
   suite talks to the app in-process, not over HTTP, so `api`/`mailhog` aren't
-  needed), `alembic upgrade head` against the real dev database as a
-  standalone checkpoint, then `pytest --cov=app --cov-report=xml`. The
-  coverage XML is uploaded as a workflow artifact. Both jobs cache Poetry's
-  install directory, keyed on `poetry.lock`'s hash — meaning `poetry.lock`
-  needs to be committed (it wasn't, from Phase 1 onward; fixed as part of this
-  phase) for the cache and reproducible installs to actually work.
+  needed), then `tox -e test` (`alembic upgrade head` against the real dev
+  database as a standalone checkpoint, then `pytest --cov=app
+  --cov-report=xml`). The coverage XML is uploaded as a workflow artifact.
+  Both jobs cache Poetry's install directory, keyed on `poetry.lock`'s hash —
+  meaning `poetry.lock` needs to be committed (it wasn't, from Phase 1 onward;
+  fixed as part of this phase) for the cache and reproducible installs to
+  actually work.
+- **`tox.ini`** is what actually defines the lint/test commands (Phase 10):
+  CI calls `poetry run tox -e lint` / `poetry run tox -e test`, and running
+  the identical command locally can never drift from what CI checks, since
+  there's only one place the commands are written down. `skip_install=true` +
+  `allowlist_externals=poetry` makes tox a thin command runner here — Poetry
+  already manages the real isolated environment, so tox isn't asked to
+  duplicate that.
 - **build** — needs lint + test to pass first. Builds the Dockerfile with
   `docker/build-push-action`, tagged with the git SHA (and `latest` on
   `main`). Pushes to GHCR only on `push` events (not `pull_request`, since
@@ -293,3 +379,49 @@ for the `api` container to create the S3 bucket, then give up. CI only starts
 creates the bucket itself if nothing has beaten it to it — self-sufficient
 regardless of which services are running, which was true of local dev too,
 just never exercised until CI needed a `db`+`localstack`-only start.
+
+## Response Conventions
+
+Every route returns JSON with the status code matching what it did, and every
+error response — whether raised by this app's own `AppError` subclasses
+(`app/core/exceptions.py`) or by FastAPI's own built-ins (validation errors,
+401 from the OAuth2 scheme, 404/405 for unmatched routes) — has the same
+`{"detail": "..."}` shape (a string, except FastAPI's 422 validation errors,
+where `detail` is its standard structured list of field errors). Verified
+directly against the running API, not just by reading the code:
+
+| Status | Example | Body |
+|---|---|---|
+| 200 | `GET /health` | `{"status": "ok", "database": "ok"}` |
+| 201 | `POST /auth` | the created resource |
+| 400 | upload a `.exe` | `{"detail": "Unsupported file type for '...'. ..."}` |
+| 401 | wrong password / no token | `{"detail": "..."}` |
+| 403 | participant tries an owner-only action | `{"detail": "You do not have permission..."}` |
+| 404 | project/document with no access row | `{"detail": "..."}` |
+| 409 | duplicate registration | `{"detail": "Login is already registered"}` |
+| 413 | upload over the size limit | `{"detail": "..."}` |
+| 422 | malformed request body | `{"detail": [{...}, ...]}` (FastAPI's own shape) |
+
+Two routes are deliberate, correct exceptions to "every response is JSON,"
+both by HTTP/REST semantics rather than oversight:
+
+- **204 No Content** (`DELETE /project/{id}`, `DELETE /document/{id}`) has no
+  body at all — that's what 204 *means*; sending a JSON body alongside it
+  would itself be the spec violation.
+- **`GET /document/{id}`** streams the raw file bytes with the document's own
+  `Content-Type` (e.g. `application/pdf`), because it's a *download* endpoint
+  — that's the correct behavior a download endpoint exists to provide, not a
+  gap in "JSON everywhere."
+
+## Packaging
+
+- `pyproject.toml` fully describes the package: name, version, author,
+  description, and dependencies split into `[tool.poetry.dependencies]`
+  (runtime) and `[tool.poetry.group.dev.dependencies]` (lint/test/tooling).
+- `poetry.lock` is committed, so `poetry install` reproduces the exact
+  versions this project is tested against, not just whatever satisfies the
+  version ranges in `pyproject.toml` on a given day.
+- `pip install .` also works from a clean clone (verified in an empty venv,
+  outside Poetry entirely) — Poetry's `poetry-core` build backend makes the
+  project a normal installable package, so `pip` doesn't need Poetry at all
+  to install it.
