@@ -8,6 +8,8 @@ services:
       - .env.example
     ports:
       - "8000:8000"
+    networks:
+      - app-network
     depends_on:
       db:
         condition: service_healthy
@@ -24,6 +26,8 @@ services:
       POSTGRES_PASSWORD: postgres
     ports:
       - "5432:5432"
+    networks:
+      - app-network
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d project_dashboard"]
       interval: 5s
@@ -34,20 +38,41 @@ services:
 
   localstack:
     image: localstack/localstack:3
+    # Shares INTERNAL_SHARED_SECRET and S3_BUCKET_NAME with the api service so
+    # the deploy_lambdas.py init hook and the api can never disagree on them.
+    env_file:
+      - .env.example
     environment:
-      SERVICES: s3
+      # logs (CloudWatch Logs) is where Lambda's own print() output lands;
+      # inspect it with `awslocal logs tail /aws/lambda/<name>`.
+      SERVICES: s3,lambda,logs
       AWS_DEFAULT_REGION: us-east-1
       DEBUG: "0"
+      # Lets Lambda execution containers spawned by LocalStack reach the
+      # api container by its compose service name.
+      LAMBDA_DOCKER_NETWORK: final-project-network
     ports:
       - "4566:4566"
+    networks:
+      - app-network
     volumes:
       - localstack_data:/var/lib/localstack
+      # LocalStack needs the host's Docker daemon to run Lambda containers.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./lambdas:/etc/localstack/lambdas:ro
+      - ./docker/localstack-init/ready.d:/etc/localstack/init/ready.d:ro
 
   mailhog:
     image: mailhog/mailhog:v1.0.1
     ports:
       - "1025:1025"  # SMTP endpoint the API sends invites to
       - "8025:8025"  # web UI for reading them
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    name: final-project-network
 
 volumes:
   postgres_data:

@@ -121,3 +121,69 @@ API logs the link instead, so nothing depends on a mail server. A mail server
 that is down or unreachable degrades to logging as well — a failed send never
 fails the share request, and the response's `email_delivery` field reports which
 path was taken.
+
+## Async Background Processing (Lambda)
+
+Phase 7 adds two Lambdas, both triggered by the same S3 `ObjectCreated` event
+(prefix-filtered to `projects/`) on the documents bucket — see
+[`lambdas/compute_size/`](lambdas/compute_size) and
+[`lambdas/resize_image/`](lambdas/resize_image) for the handlers themselves.
+
+- **`compute_size`** re-sums `documents.size_bytes` for the uploaded object's
+  project and calls back into
+  `POST /internal/projects/{project_id}/recompute-size` (protected by an
+  `X-Internal-Secret` header, not a JWT — the Lambda has no user and no
+  database credentials) to correct `projects.total_size_bytes`. The API
+  already keeps that counter right on the synchronous upload/replace/delete
+  path; this is the asynchronous *repair* path for the Phase 2
+  denormalization, recovering from any drift the synchronous path missed.
+- **`resize_image`** (optional bonus) generates a thumbnail for image uploads
+  under `thumbnails/{project_id}/{document_id}/{filename}`, using Pillow. It
+  is a fast no-op for the documents this API actually accepts today
+  (`.pdf`/`.docx`); it only does real work if `ALLOWED_DOCUMENT_EXTENSIONS` is
+  widened to include images, or for objects placed in the bucket by other
+  means.
+
+### Local deployment
+
+LocalStack (`SERVICES: s3,lambda,logs` in `docker-compose.yml`) runs both
+Lambdas. `docker/localstack-init/ready.d/deploy_lambdas.py` is a LocalStack
+["ready" init hook](https://docs.localstack.cloud/references/init-hooks/):
+LocalStack executes every `.py` file under `/etc/localstack/init/ready.d`
+with its own bundled Python once the S3/Lambda providers are up, so this
+needs no separate build step or executable bit — it runs automatically on
+`docker compose up`. It packages each Lambda's `.py` files (installing
+`requirements.txt` for the ones that have one), creates or updates both
+functions, grants S3 permission to invoke them, and wires the bucket
+notification — zero manual `awslocal` commands needed.
+
+Two things worth knowing if you poke at this yourself:
+
+- **Pillow needs a cross-platform pip install.** The init hook runs under
+  LocalStack's own Python (3.11 on a generic Linux base), not the Lambda
+  runtime container that actually executes the code (`python3.12` on Amazon
+  Linux 2023). A plain `pip install` fetches a wheel for the *build*
+  environment, which breaks at Lambda import time
+  (`cannot import name '_imaging' from 'PIL'`, a real error hit and fixed
+  during development). The fix is forcing pip to fetch the wheel for the
+  *target* platform: `--platform manylinux2014_x86_64 --python-version 3.12
+  --abi cp312 --only-binary=:all:` — the standard trick for building Lambda
+  packages on a different machine than the one that runs them.
+- **Lambda print() output goes to CloudWatch Logs, not the container's own
+  stdout.** `docker compose logs localstack` won't show it. Use:
+  ```
+  docker compose exec localstack awslocal logs filter-log-events \
+    --log-group-name /aws/lambda/compute_size --query 'events[].message' --output text
+  ```
+  (or `resize_image` for the other one.)
+
+### Checkpoint, reproduced
+
+Upload a document, and `compute_size` fires and recomputes the total. To prove
+it's genuinely the Lambda doing the work (not just the API's own synchronous
+bookkeeping), corrupt `projects.total_size_bytes` directly in Postgres, then
+upload another document — the API's synchronous path would leave the counter
+at `corrupted_value + new_upload_size`, still wrong. Only the Lambda's async
+recompute, which re-derives the total from `documents.size_bytes`, lands on
+the true sum. This was run against a fresh, from-scratch `docker compose up`
+and passed.

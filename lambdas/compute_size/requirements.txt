@@ -1,0 +1,2 @@
+# No third-party dependencies: this handler only uses the Python stdlib
+# (urllib, json, os) to call back into the internal API.

@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from app.api.auth import router as auth_router
 from app.api.documents import router as documents_router
 from app.api.health import router as health_router
+from app.api.internal import router as internal_router
 from app.api.projects import router as projects_router
 from app.api.sharing import router as sharing_router
 from app.core.config import settings
@@ -33,6 +34,7 @@ def create_app() -> FastAPI:
     app.include_router(projects_router)
     app.include_router(documents_router)
     app.include_router(sharing_router)
+    app.include_router(internal_router)
     return app
 
 

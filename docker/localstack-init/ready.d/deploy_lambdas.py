@@ -1,0 +1,201 @@
+"""LocalStack "ready" hook: packages and deploys the project's Lambdas.
+
+LocalStack runs every .py file under /etc/localstack/init/ready.d with its
+own bundled Python once the S3/Lambda providers are up, so this needs no
+executable bit (which Windows bind mounts wouldn't preserve anyway) and no
+extra dependencies beyond what LocalStack already ships (boto3).
+
+Re-running this (e.g. on `docker compose restart localstack`) is safe: it
+updates existing functions instead of failing on "already exists".
+"""
+
+import io
+import os
+import shutil
+import subprocess
+import sys
+import time
+import zipfile
+
+import boto3
+
+ENDPOINT_URL = "http://localhost:4566"
+REGION = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+BUCKET = os.environ.get("S3_BUCKET_NAME", "project-documents")
+INTERNAL_SHARED_SECRET = os.environ.get("INTERNAL_SHARED_SECRET", "")
+SOURCE_ROOT = "/etc/localstack/lambdas"
+BUILD_ROOT = "/tmp/lambda-build"
+ROLE_ARN = "arn:aws:iam::000000000000:role/lambda-role"
+BUCKET_WAIT_SECONDS = 30
+LAMBDA_PYTHON_VERSION = "3.12"  # must match the Runtime passed to create_function below
+
+
+def client(service: str):
+    return boto3.client(
+        service,
+        endpoint_url=ENDPOINT_URL,
+        region_name=REGION,
+        aws_access_key_id="test",
+        aws_secret_access_key="test",
+    )
+
+
+def read_requirements(path: str) -> list[str]:
+    if not os.path.exists(path):
+        return []
+    with open(path) as handle:
+        return [
+            line.strip()
+            for line in handle
+            if line.strip() and not line.strip().startswith("#")
+        ]
+
+
+def build_zip(name: str) -> bytes:
+    source_dir = os.path.join(SOURCE_ROOT, name)
+    build_dir = os.path.join(BUILD_ROOT, name)
+    if os.path.exists(build_dir):
+        shutil.rmtree(build_dir)
+    os.makedirs(build_dir)
+    for filename in os.listdir(source_dir):
+        if filename.endswith(".py"):
+            shutil.copy(os.path.join(source_dir, filename), build_dir)
+
+    dependencies = read_requirements(os.path.join(source_dir, "requirements.txt"))
+    if dependencies:
+        # This script runs under LocalStack's own bundled Python (currently
+        # 3.11 on a generic Debian base), not the Lambda runtime container
+        # (python3.12 on Amazon Linux 2023) that actually executes the
+        # function. Without these flags pip fetches a wheel matching *this*
+        # interpreter, which breaks compiled packages like Pillow at import
+        # time inside the Lambda (ImportError: cannot import '_imaging').
+        # Forcing the target platform/ABI makes pip fetch the wheel actually
+        # compatible with where the code runs, same as AWS's own guidance
+        # for building Lambda packages on a different machine than the target.
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--quiet",
+                "--no-cache-dir",
+                "--platform",
+                "manylinux2014_x86_64",
+                "--implementation",
+                "cp",
+                "--python-version",
+                LAMBDA_PYTHON_VERSION,
+                "--abi",
+                f"cp{LAMBDA_PYTHON_VERSION.replace('.', '')}",
+                "--only-binary=:all:",
+                "--target",
+                build_dir,
+                *dependencies,
+            ],
+            check=True,
+        )
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for root, _dirs, files in os.walk(build_dir):
+            for filename in files:
+                full_path = os.path.join(root, filename)
+                archive.write(full_path, os.path.relpath(full_path, build_dir))
+    return buffer.getvalue()
+
+
+def deploy(lambda_client, name: str, environment: dict[str, str]) -> str:
+    zip_bytes = build_zip(name)
+
+    try:
+        lambda_client.get_function(FunctionName=name)
+        lambda_client.update_function_code(FunctionName=name, ZipFile=zip_bytes)
+        lambda_client.update_function_configuration(
+            FunctionName=name, Environment={"Variables": environment}
+        )
+    except lambda_client.exceptions.ResourceNotFoundException:
+        lambda_client.create_function(
+            FunctionName=name,
+            Runtime=f"python{LAMBDA_PYTHON_VERSION}",
+            Handler="handler.handler",
+            Role=ROLE_ARN,
+            Code={"ZipFile": zip_bytes},
+            Timeout=30,
+            Environment={"Variables": environment},
+        )
+
+    lambda_client.get_waiter("function_active_v2").wait(FunctionName=name)
+
+    try:
+        lambda_client.add_permission(
+            FunctionName=name,
+            StatementId="s3invoke",
+            Action="lambda:InvokeFunction",
+            Principal="s3.amazonaws.com",
+            SourceArn=f"arn:aws:s3:::{BUCKET}",
+        )
+    except lambda_client.exceptions.ResourceConflictException:
+        pass  # permission already granted by a previous run
+
+    return lambda_client.get_function(FunctionName=name)["Configuration"]["FunctionArn"]
+
+
+def wait_for_bucket(s3_client) -> None:
+    """The api container also creates the bucket on startup; whichever wins, wait for it."""
+    for _ in range(BUCKET_WAIT_SECONDS):
+        try:
+            s3_client.head_bucket(Bucket=BUCKET)
+            return
+        except Exception:  # noqa: BLE001 - bucket-not-found errors vary, just retry
+            time.sleep(1)
+    raise RuntimeError(f"bucket {BUCKET} did not appear within {BUCKET_WAIT_SECONDS}s")
+
+
+def main() -> None:
+    lambda_client = client("lambda")
+    s3_client = client("s3")
+
+    wait_for_bucket(s3_client)
+
+    compute_size_arn = deploy(
+        lambda_client,
+        "compute_size",
+        {
+            "INTERNAL_API_URL": "http://api:8000",
+            "INTERNAL_SHARED_SECRET": INTERNAL_SHARED_SECRET,
+        },
+    )
+    resize_image_arn = deploy(lambda_client, "resize_image", {})
+
+    s3_client.put_bucket_notification_configuration(
+        Bucket=BUCKET,
+        NotificationConfiguration={
+            "LambdaFunctionConfigurations": [
+                {
+                    "Id": "compute-size-on-upload",
+                    "LambdaFunctionArn": compute_size_arn,
+                    "Events": ["s3:ObjectCreated:*"],
+                    "Filter": {
+                        "Key": {"FilterRules": [{"Name": "prefix", "Value": "projects/"}]}
+                    },
+                },
+                {
+                    "Id": "resize-image-on-upload",
+                    "LambdaFunctionArn": resize_image_arn,
+                    "Events": ["s3:ObjectCreated:*"],
+                    "Filter": {
+                        "Key": {"FilterRules": [{"Name": "prefix", "Value": "projects/"}]}
+                    },
+                },
+            ]
+        },
+    )
+
+    print("[lambda-init] compute_size and resize_image deployed and wired to S3 notifications")
+
+
+# LocalStack's Python init-hook runner does exec(source, {}) with an empty
+# globals dict, so `__name__` is never "__main__" here — an `if __name__ ==
+# "__main__"` guard would make main() silently never run. Call it directly.
+main()

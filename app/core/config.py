@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     max_document_size_bytes: int = 25 * 1024 * 1024
     allowed_document_extensions: str = ".pdf,.docx"
 
+    internal_shared_secret: str = Field(default="change-me-in-development", min_length=16)
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
     @property
