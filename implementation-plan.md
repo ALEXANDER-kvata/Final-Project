@@ -46,7 +46,6 @@ Goal: `docker compose up` gives you a running (empty) API + Postgres, and
      db/            # session, base, migrations (alembic/)
      storage/        # S3 client wrapper
    lambdas/
-     resize_image/
      compute_size/
    tests/
    pyproject.toml
@@ -229,7 +228,7 @@ their `GET /projects`.
 
 ---
 
-## Phase 7 — S3 + Lambda (image resize, size calculation)
+## Phase 7 — S3 + Lambda (size calculation)
 
 Goal: an S3 event triggers a Lambda that does async work.
 
@@ -241,14 +240,11 @@ Goal: an S3 event triggers a Lambda that does async work.
    simpler for a course project, call back into a small internal API
    endpoint (`POST /internal/projects/{id}/recompute-size`) protected by
    a shared secret, so the Lambda doesn't need direct DB creds.
-3. **Image resize Lambda (optional):** if the uploaded doc is an image
-   (or you extend scope to support images), generate a thumbnail and
-   store it back to S3 under a `thumbnails/` prefix.
-4. Local testing: LocalStack supports Lambda + S3 event notifications, so
+3. Local testing: LocalStack supports Lambda + S3 event notifications, so
    you can trigger and debug this without touching real AWS.
-5. Package each Lambda with its own minimal `requirements.txt` (keep
+4. Package the Lambda with its own minimal `requirements.txt` (keep
    dependencies light — boto3 is already available in the Lambda runtime).
-6. IaC (optional but a nice bonus): a small Terraform or AWS SAM template
+5. IaC (optional but a nice bonus): a small Terraform or AWS SAM template
    defining the bucket, event notification, and Lambda — even if you
    deploy manually for the course, having this documents the setup.
 
@@ -328,7 +324,7 @@ Goal: push → lint + test + build image; merge to main → deploy.
 4. Projects CRUD + access control
 5. Documents + S3
 6. Invite/share
-7. Lambda (size calc, optional resize)
+7. Lambda (size calc)
 8. Tests
 9. CI/CD
 10. Packaging + README

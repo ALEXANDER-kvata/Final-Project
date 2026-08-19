@@ -4,6 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 from jose import jwt
 from pydantic import ValidationError
+from sqlalchemy.exc import IntegrityError
 
 from app.core.config import settings
 from app.core.dependencies import get_db
@@ -87,6 +88,48 @@ def test_login_accepts_json_payload() -> None:
     assert response.status_code == 200
     assert response.json()["token_type"] == "bearer"
     assert response.json()["access_token"]
+
+
+def test_register_recovers_when_two_registrations_race() -> None:
+    """Two concurrent registrations for the same login can both pass the
+    initial "login is free" check; the DB's unique constraint is the real
+    guard, and the loser must turn that IntegrityError into a 409 instead of
+    a 500."""
+
+    class RacingDb:
+        def __init__(self) -> None:
+            self.rolled_back = False
+
+        async def scalar(self, _statement: object) -> None:
+            return None
+
+        def add(self, _instance: object) -> None:
+            pass
+
+        async def commit(self) -> None:
+            raise IntegrityError("insert", {}, Exception("duplicate key"))
+
+        async def rollback(self) -> None:
+            self.rolled_back = True
+
+    db = RacingDb()
+    app.dependency_overrides[get_db] = lambda: db
+    client = TestClient(app)
+
+    try:
+        response = client.post(
+            "/auth",
+            json={
+                "login": "demo",
+                "password": "password123",
+                "repeat_password": "password123",
+            },
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 409
+    assert db.rolled_back is True
 
 
 def test_login_accepts_oauth_form_payload() -> None:

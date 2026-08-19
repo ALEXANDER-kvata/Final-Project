@@ -1,4 +1,4 @@
-"""LocalStack "ready" hook: packages and deploys the project's Lambdas.
+"""LocalStack "ready" hook: packages and deploys the project's compute_size Lambda.
 
 LocalStack runs every .py file under /etc/localstack/init/ready.d with its
 own bundled Python once the S3/Lambda providers are up, so this needs no
@@ -6,14 +6,12 @@ executable bit (which Windows bind mounts wouldn't preserve anyway) and no
 extra dependencies beyond what LocalStack already ships (boto3).
 
 Re-running this (e.g. on `docker compose restart localstack`) is safe: it
-updates existing functions instead of failing on "already exists".
+updates the existing function instead of failing on "already exists".
 """
 
 import io
 import os
 import shutil
-import subprocess
-import sys
 import zipfile
 
 import boto3
@@ -39,15 +37,6 @@ def client(service: str):
     )
 
 
-def read_requirements(path: str) -> list[str]:
-    if not os.path.exists(path):
-        return []
-    with open(path) as handle:
-        return [
-            line.strip() for line in handle if line.strip() and not line.strip().startswith("#")
-        ]
-
-
 def build_zip(name: str) -> bytes:
     source_dir = os.path.join(SOURCE_ROOT, name)
     build_dir = os.path.join(BUILD_ROOT, name)
@@ -57,41 +46,6 @@ def build_zip(name: str) -> bytes:
     for filename in os.listdir(source_dir):
         if filename.endswith(".py"):
             shutil.copy(os.path.join(source_dir, filename), build_dir)
-
-    dependencies = read_requirements(os.path.join(source_dir, "requirements.txt"))
-    if dependencies:
-        # This script runs under LocalStack's own bundled Python (currently
-        # 3.11 on a generic Debian base), not the Lambda runtime container
-        # (python3.12 on Amazon Linux 2023) that actually executes the
-        # function. Without these flags pip fetches a wheel matching *this*
-        # interpreter, which breaks compiled packages like Pillow at import
-        # time inside the Lambda (ImportError: cannot import '_imaging').
-        # Forcing the target platform/ABI makes pip fetch the wheel actually
-        # compatible with where the code runs, same as AWS's own guidance
-        # for building Lambda packages on a different machine than the target.
-        subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pip",
-                "install",
-                "--quiet",
-                "--no-cache-dir",
-                "--platform",
-                "manylinux2014_x86_64",
-                "--implementation",
-                "cp",
-                "--python-version",
-                LAMBDA_PYTHON_VERSION,
-                "--abi",
-                f"cp{LAMBDA_PYTHON_VERSION.replace('.', '')}",
-                "--only-binary=:all:",
-                "--target",
-                build_dir,
-                *dependencies,
-            ],
-            check=True,
-        )
 
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
@@ -172,7 +126,6 @@ def main() -> None:
             "INTERNAL_SHARED_SECRET": INTERNAL_SHARED_SECRET,
         },
     )
-    resize_image_arn = deploy(lambda_client, "resize_image", {})
 
     s3_client.put_bucket_notification_configuration(
         Bucket=BUCKET,
@@ -184,17 +137,11 @@ def main() -> None:
                     "Events": ["s3:ObjectCreated:*"],
                     "Filter": {"Key": {"FilterRules": [{"Name": "prefix", "Value": "projects/"}]}},
                 },
-                {
-                    "Id": "resize-image-on-upload",
-                    "LambdaFunctionArn": resize_image_arn,
-                    "Events": ["s3:ObjectCreated:*"],
-                    "Filter": {"Key": {"FilterRules": [{"Name": "prefix", "Value": "projects/"}]}},
-                },
             ]
         },
     )
 
-    print("[lambda-init] compute_size and resize_image deployed and wired to S3 notifications")
+    print("[lambda-init] compute_size deployed and wired to S3 notifications")
 
 
 # LocalStack's Python init-hook runner does exec(source, {}) with an empty

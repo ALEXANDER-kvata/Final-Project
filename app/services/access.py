@@ -1,9 +1,7 @@
-from collections.abc import Callable
-from typing import Annotated
+from typing import Annotated, Protocol
 
 from fastapi import Depends
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_db
 from app.core.exceptions import ForbiddenError, NotFoundError
@@ -18,8 +16,51 @@ ROLE_RANK = {
 }
 
 
+class SupportsScalarLookup(Protocol):
+    """The slice of ``AsyncSession`` that ``get_user_role`` relies on.
+
+    Kept narrow so tests can pass a lightweight fake instead of a real
+    ``AsyncSession`` without upsetting the type checker.
+    """
+
+    async def scalar(self, statement: object) -> ProjectRole | None: ...
+
+
+class SupportsDocumentLookup(SupportsScalarLookup, Protocol):
+    """The slice of ``AsyncSession`` that ``require_document_role`` relies on."""
+
+    async def get(self, entity: type[Document], ident: int) -> Document | None: ...
+
+
+class RoleDependency(Protocol):
+    """Callable shape of a ``require_role`` dependency, keyed by name.
+
+    FastAPI's ``Depends`` resolves these by parameter name, and tests call
+    them the same way, so the type keeps those names rather than collapsing
+    to a positional ``Callable``.
+    """
+
+    async def __call__(
+        self,
+        project_id: int,
+        db: SupportsScalarLookup,
+        current_user: User,
+    ) -> ProjectRole: ...
+
+
+class DocumentRoleDependency(Protocol):
+    """Callable shape of a ``require_document_role`` dependency, keyed by name."""
+
+    async def __call__(
+        self,
+        document_id: int,
+        db: SupportsDocumentLookup,
+        current_user: User,
+    ) -> Document: ...
+
+
 async def get_user_role(
-    db: AsyncSession,
+    db: SupportsScalarLookup,
     project_id: int,
     user_id: int,
 ) -> ProjectRole | None:
@@ -33,10 +74,10 @@ async def get_user_role(
 
 def require_role(
     minimum_role: ProjectRole,
-) -> Callable[[int, AsyncSession, User], ProjectRole]:
+) -> RoleDependency:
     async def dependency(
         project_id: int,
-        db: Annotated[AsyncSession, Depends(get_db)],
+        db: Annotated[SupportsScalarLookup, Depends(get_db)],
         current_user: Annotated[User, Depends(get_current_user)],
     ) -> ProjectRole:
         role = await get_user_role(db, project_id, current_user.id)
@@ -53,12 +94,12 @@ def require_role(
 
 def require_document_role(
     minimum_role: ProjectRole,
-) -> Callable[[int, AsyncSession, User], Document]:
+) -> DocumentRoleDependency:
     """Resolve a document and authorize the caller against its *parent project*."""
 
     async def dependency(
         document_id: int,
-        db: Annotated[AsyncSession, Depends(get_db)],
+        db: Annotated[SupportsDocumentLookup, Depends(get_db)],
         current_user: Annotated[User, Depends(get_current_user)],
     ) -> Document:
         document = await db.get(Document, document_id)

@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import IntegrityError
 
 from app.core.config import settings
 from app.core.exceptions import BadRequestError
@@ -21,7 +22,7 @@ class FakeDb:
         self.added: list[object] = []
         self.commits = 0
 
-    async def scalar(self, _statement: object) -> ProjectAccess | None:
+    async def scalar(self, statement: object) -> ProjectAccess | None:
         return self.existing
 
     def add(self, instance: object) -> None:
@@ -29,6 +30,9 @@ class FakeDb:
 
     async def commit(self) -> None:
         self.commits += 1
+
+    async def rollback(self) -> None:
+        pass
 
 
 def test_sharing_routes_are_registered_in_openapi() -> None:
@@ -121,6 +125,36 @@ async def test_grant_access_never_demotes_an_owner() -> None:
 
     assert created is False
     assert access.role == ProjectRole.owner
+
+
+async def test_grant_access_recovers_when_two_invites_race() -> None:
+    """Two concurrent invites can both pass the initial "no existing row" check;
+    only one INSERT wins the composite primary key and the loser must recover
+    by re-reading what the winner wrote, instead of letting the IntegrityError
+    bubble up as a 500."""
+    winner = ProjectAccess(project_id=3, user_id=7, role=ProjectRole.participant)
+
+    class RacingDb(FakeDb):
+        def __init__(self) -> None:
+            super().__init__(existing=None)
+            self._scalar_calls = 0
+
+        async def scalar(self, statement: object) -> ProjectAccess | None:
+            self._scalar_calls += 1
+            return None if self._scalar_calls == 1 else winner
+
+        async def commit(self) -> None:
+            self.commits += 1
+            raise IntegrityError("insert", {}, Exception("duplicate key"))
+
+    db = RacingDb()
+    user = User(id=7, login="invitee", password_hash="hidden")
+
+    access, created = await grant_access(db, project_id=3, user=user)
+
+    assert created is False
+    assert access is winner
+    assert db.commits == 1
 
 
 async def test_invite_email_falls_back_to_logging_without_smtp(

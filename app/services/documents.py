@@ -1,9 +1,8 @@
 """Validation helpers shared by the document endpoints."""
 
 from pathlib import PurePosixPath
+from typing import Protocol
 from urllib.parse import quote
-
-from fastapi import UploadFile
 
 from app.core.config import settings
 from app.core.exceptions import BadRequestError, PayloadTooLargeError
@@ -11,6 +10,19 @@ from app.models.project import Project
 
 READ_CHUNK_SIZE = 1024 * 1024
 DEFAULT_CONTENT_TYPE = "application/octet-stream"
+
+
+class SupportsChunkedRead(Protocol):
+    """The slice of ``UploadFile`` that ``read_upload`` relies on.
+
+    Kept narrow so tests can pass a lightweight fake instead of a real
+    ``UploadFile`` without upsetting the type checker.
+    """
+
+    @property
+    def filename(self) -> str | None: ...
+
+    async def read(self, size: int = -1) -> bytes: ...
 
 
 def sanitize_filename(filename: str | None) -> str:
@@ -31,7 +43,7 @@ def validate_extension(filename: str) -> None:
         )
 
 
-async def read_upload(upload: UploadFile, max_bytes: int | None = None) -> bytes:
+async def read_upload(upload: SupportsChunkedRead, max_bytes: int | None = None) -> bytes:
     """Read an upload chunk by chunk, aborting as soon as it passes the limit."""
     limit = settings.max_document_size_bytes if max_bytes is None else max_bytes
     chunks: list[bytes] = []

@@ -35,7 +35,8 @@ class StorageError(AppError):
     detail = "Storage backend error"
 
 
-async def app_error_handler(_request: Request, exc: AppError) -> JSONResponse:
+async def app_error_handler(_request: Request, exc: Exception) -> JSONResponse:
+    assert isinstance(exc, AppError)
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 

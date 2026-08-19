@@ -1,15 +1,30 @@
 """Granting project access to other users."""
 
+from typing import Protocol
+
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import Select
 
 from app.models.project_access import ProjectAccess, ProjectRole
 from app.models.user import User
 
 
+class SupportsGrantAccess(Protocol):
+    """The slice of ``AsyncSession`` that ``grant_access`` relies on.
+
+    Kept narrow so tests can pass a lightweight fake instead of a real
+    ``AsyncSession`` without upsetting the type checker.
+    """
+
+    async def scalar(self, statement: Select[tuple[ProjectAccess]]) -> ProjectAccess | None: ...
+    def add(self, instance: object) -> None: ...
+    async def commit(self) -> None: ...
+    async def rollback(self) -> None: ...
+
+
 async def grant_access(
-    db: AsyncSession,
+    db: SupportsGrantAccess,
     project_id: int,
     user: User,
     role: ProjectRole = ProjectRole.participant,

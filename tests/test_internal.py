@@ -119,7 +119,7 @@ def test_recompute_size_404s_for_unknown_project() -> None:
     [
         ("projects/7/42/report.pdf", 7),
         ("projects/1/1/a b.pdf", 1),
-        ("thumbnails/7/42/report.pdf", None),
+        ("other/7/42/report.pdf", None),
         ("projects/", None),
         ("projects/not-a-number/42/report.pdf", None),
         ("", None),
@@ -129,34 +129,3 @@ def test_compute_size_lambda_parses_project_id_from_key(key: str, expected: int 
     from lambdas.compute_size.handler import _project_id_from_key
 
     assert _project_id_from_key(key) == expected
-
-
-@pytest.mark.parametrize(
-    ("key", "expected"),
-    [
-        ("projects/7/42/photo.png", "thumbnails/7/42/photo.png"),
-        ("projects/7/42/report.pdf", "thumbnails/7/42/report.pdf"),
-        ("thumbnails/7/42/photo.png", None),
-        ("other/7/42/photo.png", None),
-    ],
-)
-def test_resize_image_lambda_derives_thumbnail_key(key: str, expected: str | None) -> None:
-    from lambdas.resize_image.logic import thumbnail_key
-
-    assert thumbnail_key(key) == expected
-
-
-@pytest.mark.parametrize(
-    ("filename", "is_image"),
-    [
-        ("photo.png", True),
-        ("photo.JPG", True),
-        ("photo.jpeg", True),
-        ("report.pdf", False),
-        ("report.docx", False),
-    ],
-)
-def test_resize_image_lambda_extension_filter(filename: str, is_image: bool) -> None:
-    from lambdas.resize_image.logic import is_image_key
-
-    assert is_image_key(filename) is is_image

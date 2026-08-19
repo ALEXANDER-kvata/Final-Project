@@ -15,7 +15,7 @@ invites, and async background processing via Lambda.
 | Config | [`pydantic-settings`](https://docs.pydantic.dev/latest/concepts/pydantic_settings/) | typed env-var settings (`app/core/config.py`) |
 | Object storage | [`aioboto3`](https://github.com/terrycain/aioboto3) against [LocalStack](https://www.localstack.cloud/) (dev) or real S3 (prod) | async S3 client, same code path both environments |
 | Email (dev) | [MailHog](https://github.com/mailhog/MailHog) over SMTP (stdlib `smtplib`) | invite links land in a local inbox instead of needing real SMTP/SES |
-| Background compute | AWS Lambda (via LocalStack locally), [Pillow](https://pillow.readthedocs.io/) for thumbnails | async size recompute + optional image thumbnailing, triggered by S3 events |
+| Background compute | AWS Lambda (via LocalStack locally) | async project size recompute, triggered by S3 upload events |
 | Containers | Docker, Docker Compose | one command brings up the whole stack: api, db, localstack, mailhog |
 | Testing | `pytest`, `pytest-asyncio`, `pytest-cov`, `httpx` (`ASGITransport`) | unit tests (fakes) + integration tests (real Postgres/S3) — see [Testing](#testing) |
 | Lint / format | [`ruff`](https://docs.astral.sh/ruff/) | one fast tool covering flake8 + isort + a formatter |
@@ -34,17 +34,14 @@ flowchart LR
     API --> Mail["MailHog (SMTP, dev)"]
 
     S3 -->|"ObjectCreated event"| ComputeSize["compute_size Lambda"]
-    S3 -->|"ObjectCreated event"| ResizeImage["resize_image Lambda"]
     ComputeSize -->|"X-Internal-Secret"| API
-    ResizeImage -->|"writes thumbnails/..."| S3
 ```
 
-The API is the only thing clients talk to directly. Lambdas are invoked
+The API is the only thing clients talk to directly. The Lambda is invoked
 asynchronously by S3 itself, not by the API — `compute_size` calls back into
 a small internal endpoint (shared-secret, not JWT, since a Lambda has no
-user), and `resize_image` writes straight back to S3. See
-[Async Background Processing](#async-background-processing-lambda) for why
-that split exists.
+user). See [Async Background Processing](#async-background-processing-lambda)
+for why that split exists.
 
 ## Getting Started
 
@@ -199,10 +196,9 @@ path was taken.
 
 ## Async Background Processing (Lambda)
 
-Phase 7 adds two Lambdas, both triggered by the same S3 `ObjectCreated` event
-(prefix-filtered to `projects/`) on the documents bucket — see
-[`lambdas/compute_size/`](lambdas/compute_size) and
-[`lambdas/resize_image/`](lambdas/resize_image) for the handlers themselves.
+Phase 7 adds a Lambda triggered by S3 `ObjectCreated` events (prefix-filtered
+to `projects/`) on the documents bucket — see
+[`lambdas/compute_size/`](lambdas/compute_size) for the handler itself.
 
 - **`compute_size`** re-sums `documents.size_bytes` for the uploaded object's
   project and calls back into
@@ -212,45 +208,27 @@ Phase 7 adds two Lambdas, both triggered by the same S3 `ObjectCreated` event
   already keeps that counter right on the synchronous upload/replace/delete
   path; this is the asynchronous *repair* path for the Phase 2
   denormalization, recovering from any drift the synchronous path missed.
-- **`resize_image`** (optional bonus) generates a thumbnail for image uploads
-  under `thumbnails/{project_id}/{document_id}/{filename}`, using Pillow. It
-  is a fast no-op for the documents this API actually accepts today
-  (`.pdf`/`.docx`); it only does real work if `ALLOWED_DOCUMENT_EXTENSIONS` is
-  widened to include images, or for objects placed in the bucket by other
-  means.
 
 ### Local deployment
 
-LocalStack (`SERVICES: s3,lambda,logs` in `docker-compose.yml`) runs both
-Lambdas. `docker/localstack-init/ready.d/deploy_lambdas.py` is a LocalStack
+LocalStack (`SERVICES: s3,lambda,logs` in `docker-compose.yml`) runs the
+Lambda. `docker/localstack-init/ready.d/deploy_lambdas.py` is a LocalStack
 ["ready" init hook](https://docs.localstack.cloud/references/init-hooks/):
 LocalStack executes every `.py` file under `/etc/localstack/init/ready.d`
 with its own bundled Python once the S3/Lambda providers are up, so this
 needs no separate build step or executable bit — it runs automatically on
-`docker compose up`. It packages each Lambda's `.py` files (installing
-`requirements.txt` for the ones that have one), creates or updates both
-functions, grants S3 permission to invoke them, and wires the bucket
+`docker compose up`. It packages the Lambda's `.py` files, creates or updates
+the function, grants S3 permission to invoke it, and wires the bucket
 notification — zero manual `awslocal` commands needed.
 
-Two things worth knowing if you poke at this yourself:
+One thing worth knowing if you poke at this yourself: **Lambda `print()`
+output goes to CloudWatch Logs, not the container's own stdout.**
+`docker compose logs localstack` won't show it. Use:
 
-- **Pillow needs a cross-platform pip install.** The init hook runs under
-  LocalStack's own Python (3.11 on a generic Linux base), not the Lambda
-  runtime container that actually executes the code (`python3.12` on Amazon
-  Linux 2023). A plain `pip install` fetches a wheel for the *build*
-  environment, which breaks at Lambda import time
-  (`cannot import name '_imaging' from 'PIL'`, a real error hit and fixed
-  during development). The fix is forcing pip to fetch the wheel for the
-  *target* platform: `--platform manylinux2014_x86_64 --python-version 3.12
-  --abi cp312 --only-binary=:all:` — the standard trick for building Lambda
-  packages on a different machine than the one that runs them.
-- **Lambda print() output goes to CloudWatch Logs, not the container's own
-  stdout.** `docker compose logs localstack` won't show it. Use:
-  ```
-  docker compose exec localstack awslocal logs filter-log-events \
-    --log-group-name /aws/lambda/compute_size --query 'events[].message' --output text
-  ```
-  (or `resize_image` for the other one.)
+```
+docker compose exec localstack awslocal logs filter-log-events \
+  --log-group-name /aws/lambda/compute_size --query 'events[].message' --output text
+```
 
 ### Checkpoint, reproduced
 

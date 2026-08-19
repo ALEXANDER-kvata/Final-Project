@@ -1,13 +1,16 @@
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import IntegrityError
 
 from app.core.config import settings
+from app.core.dependencies import get_db
 from app.core.exceptions import (
     BadRequestError,
     ForbiddenError,
     NotFoundError,
     PayloadTooLargeError,
 )
+from app.core.security import get_current_user
 from app.main import app
 from app.models.document import Document
 from app.models.project import Project
@@ -21,6 +24,7 @@ from app.services.documents import (
     sanitize_filename,
     validate_extension,
 )
+from app.storage import s3_client
 from app.storage.s3_client import build_document_key
 
 
@@ -121,6 +125,68 @@ def test_content_disposition_keeps_unicode_filenames_readable() -> None:
     assert header.isascii()
 
 
+async def test_upload_documents_cleans_up_s3_when_the_commit_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A DB failure after files are already in S3 must not leave orphaned
+    objects behind: the route rolls back the transaction and deletes
+    everything it just uploaded."""
+    project = Project(id=1, name="demo", owner_id=1, total_size_bytes=0)
+
+    class FailingDb:
+        def __init__(self) -> None:
+            self.rolled_back = False
+            self._next_id = 100
+
+        async def get(self, entity: object, ident: object) -> Project:
+            return project
+
+        async def scalar(self, statement: object) -> ProjectRole:
+            return ProjectRole.participant
+
+        def add(self, instance: Document) -> None:
+            instance.id = self._next_id
+            self._next_id += 1
+
+        async def flush(self) -> None:
+            pass
+
+        async def commit(self) -> None:
+            raise IntegrityError("insert", {}, Exception("boom"))
+
+        async def rollback(self) -> None:
+            self.rolled_back = True
+
+    db = FailingDb()
+    deleted_keys: list[str] = []
+
+    async def fake_upload(key: str, data: bytes, content_type: str) -> None:
+        pass
+
+    async def fake_delete_objects(keys: list[str]) -> None:
+        deleted_keys.extend(keys)
+
+    monkeypatch.setattr(s3_client, "upload", fake_upload)
+    monkeypatch.setattr(s3_client, "delete_objects", fake_delete_objects)
+    app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[get_current_user] = lambda: User(
+        id=1, login="demo", password_hash="hidden"
+    )
+    client = TestClient(app)
+
+    try:
+        with pytest.raises(IntegrityError):
+            client.post(
+                "/project/1/documents",
+                files=[("files", ("report.pdf", b"%PDF-1.7", "application/pdf"))],
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert db.rolled_back is True
+    assert deleted_keys == ["projects/1/100/report.pdf"]
+
+
 def _document(project_id: int = 1) -> Document:
     return Document(
         id=10,
@@ -138,10 +204,10 @@ class FakeDb:
         self._document = document
         self._role = role
 
-    async def get(self, _model: object, _pk: object) -> Document | None:
+    async def get(self, entity: object, ident: object) -> Document | None:
         return self._document
 
-    async def scalar(self, _statement: object) -> ProjectRole | None:
+    async def scalar(self, statement: object) -> ProjectRole | None:
         return self._role
 
 

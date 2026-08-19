@@ -64,7 +64,7 @@ async def recompute_project_size(
             Document.project_id == project_id
         )
     )
-    project.total_size_bytes = int(total)
+    project.total_size_bytes = total or 0
     await db.commit()
 
     return RecomputeSizeOut(project_id=project_id, total_size_bytes=project.total_size_bytes)

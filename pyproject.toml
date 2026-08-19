@@ -43,9 +43,10 @@ markers = [
 source = ["app"]
 omit = ["app/db/migrations/*"]
 # SQLAlchemy's async engine bridges to its sync core via greenlet, so awaited
-# DB calls run inside a spawned greenlet. Without this, coverage.py can't see
-# into that and under-counts every route that touches the database.
-concurrency = ["greenlet"]
+# DB calls run inside a spawned greenlet. Starlette's sync TestClient runs the
+# whole ASGI app in a background thread. Without both, coverage.py can't see
+# into either and under-counts routes exercised through TestClient.
+concurrency = ["greenlet", "thread"]
 
 [tool.coverage.report]
 exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:"]

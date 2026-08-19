@@ -33,20 +33,21 @@ def _build_message(recipient: str, project_name: str, invite_url: str) -> EmailM
     return message
 
 
-def _send_over_smtp(message: EmailMessage) -> None:
-    with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=SMTP_TIMEOUT_SECONDS) as smtp:
+def _send_over_smtp(message: EmailMessage, host: str) -> None:
+    with smtplib.SMTP(host, settings.smtp_port, timeout=SMTP_TIMEOUT_SECONDS) as smtp:
         smtp.send_message(message)
 
 
 async def send_invite_email(recipient: str, project_name: str, invite_url: str) -> DeliveryMode:
-    if not settings.smtp_host:
+    host = settings.smtp_host
+    if not host:
         logger.info("Invite link for %s: %s", recipient, invite_url)
         return "logged"
 
     message = _build_message(recipient, project_name, invite_url)
     try:
         # smtplib is blocking, so keep it off the event loop.
-        await asyncio.to_thread(_send_over_smtp, message)
+        await asyncio.to_thread(_send_over_smtp, message, host)
     except (OSError, smtplib.SMTPException):
         logger.warning(
             "SMTP delivery to %s failed; invite link: %s", recipient, invite_url, exc_info=True

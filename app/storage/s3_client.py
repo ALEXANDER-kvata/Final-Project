@@ -17,7 +17,9 @@ from app.core.exceptions import NotFoundError, StorageError
 CHUNK_SIZE = 1024 * 1024
 
 _MISSING_OBJECT_CODES = {"404", "NoSuchKey", "NoSuchBucket"}
-_session = aioboto3.Session()
+# aioboto3 ships no py.typed/stubs, so its dynamically-built client() return
+# type can't be inferred; typing this Any avoids a bogus __aenter__ error.
+_session: Any = aioboto3.Session()
 
 
 def build_document_key(project_id: int, document_id: int, filename: str) -> str:
@@ -86,20 +88,6 @@ async def ensure_object_exists(key: str) -> None:
     try:
         async with s3_client() as client:
             await client.head_object(Bucket=settings.s3_bucket_name, Key=key)
-    except ClientError as exc:
-        if _is_missing_object(exc):
-            raise NotFoundError("Document content is missing from storage") from exc
-        raise _storage_error("read", exc) from exc
-    except BotoCoreError as exc:
-        raise _storage_error("read", exc) from exc
-
-
-async def download(key: str) -> bytes:
-    try:
-        async with s3_client() as client:
-            response = await client.get_object(Bucket=settings.s3_bucket_name, Key=key)
-            async with response["Body"] as body:
-                return await body.read()
     except ClientError as exc:
         if _is_missing_object(exc):
             raise NotFoundError("Document content is missing from storage") from exc

@@ -29,7 +29,7 @@ def test_project_routes_require_authentication() -> None:
 @pytest.mark.asyncio
 async def test_require_role_allows_owner_for_owner_action() -> None:
     class FakeDb:
-        async def scalar(self, _statement: object) -> ProjectRole:
+        async def scalar(self, statement: object) -> ProjectRole:
             return ProjectRole.owner
 
     dependency = require_role(ProjectRole.owner)
@@ -45,7 +45,7 @@ async def test_require_role_allows_owner_for_owner_action() -> None:
 @pytest.mark.asyncio
 async def test_require_role_rejects_participant_for_owner_action() -> None:
     class FakeDb:
-        async def scalar(self, _statement: object) -> ProjectRole:
+        async def scalar(self, statement: object) -> ProjectRole:
             return ProjectRole.participant
 
     dependency = require_role(ProjectRole.owner)
@@ -61,7 +61,7 @@ async def test_require_role_rejects_participant_for_owner_action() -> None:
 @pytest.mark.asyncio
 async def test_require_role_hides_project_without_access() -> None:
     class FakeDb:
-        async def scalar(self, _statement: object) -> None:
+        async def scalar(self, statement: object) -> None:
             return None
 
     dependency = require_role(ProjectRole.participant)
