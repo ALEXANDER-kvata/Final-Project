@@ -66,7 +66,30 @@ async def register_user(
     return user
 
 
-@router.post("/login", response_model=TokenOut)
+@router.post(
+    "/login",
+    response_model=TokenOut,
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "schema": UserLogin.model_json_schema(),
+                },
+                "application/x-www-form-urlencoded": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "username": {"type": "string", "description": "Same as 'login'"},
+                            "password": {"type": "string"},
+                        },
+                        "required": ["username", "password"],
+                    },
+                },
+            },
+            "required": True,
+        }
+    },
+)
 async def login_user(
     payload: Annotated[UserLogin, Depends(read_login_payload)],
     db: Annotated[AsyncSession, Depends(get_db)],
